@@ -1,0 +1,355 @@
+#!/usr/bin/perl
+# 
+# cap-kwic: Parse Caselaw Access Project (CAP) bulk-downloaded data to
+# output a keyword and its context in opinion text, output as TSV/CSV
+#
+# by Eric Nystrom, http://ericnystrom.org
+#   started: February 22, 2019
+#   version: May 19, 2020
+#
+#   license: MIT License
+
+# Much love to PerlMonks and StackOverflow.
+
+# Note: Built (after some experimentation) to work with either the
+# default output from CAP, or the "jq" prettyprinted version thereof,
+# and to parse the JSON incrementally so it wouldn't run out of memory
+# even with gigantic files. Either of these can be piped to this
+# program. Also note that CAP output is a series of independent JSON
+# objects, each enclosed with {}, rather than a gigantic series of
+# objects within a single JSON array, as is sometimes found in the
+# wild.
+
+# The Standard Preamble for Unicode: https://www.perl.com/pub/2012/04/perlunicook-standard-preamble.html/
+use utf8;      # so literals and identifiers can be in UTF-8
+use v5.12;     # or later to get "unicode_strings" feature
+use strict;    # quote strings, declare variables
+use warnings;  # on by default
+use warnings  qw(FATAL utf8);    # fatalize encoding glitches
+use open      qw(:std :utf8);    # undeclared streams in UTF-8
+use charnames qw(:full :short);  # unneeded in v5.16
+use Encode qw(decode_utf8);
+
+use JSON 'decode_json';     # Debian: libjson-perl
+#use Perl6::Slurp;           # Debian: libperl6-slurp-perl
+use Text::Unidecode;        # Debian: libtext-unidecode-perl
+use Text::Trim;             # Debian: libtext-trim-perl
+use Getopt::Long qw(GetOptions);
+Getopt::Long::Configure qw(gnu_getopt);
+
+# For debugging
+#use Data::Dumper;
+# #print Dumper(@pieces);
+
+## Process command line options 
+##   see: https://perlmaven.com/how-to-process-command-line-arguments-in-perl
+
+#   Output separator
+#my $sep = "|";
+my $sep = "\t";
+
+#   Default number of words of context to show
+my $context = 5;
+
+#   Variable for the word (or phrase, in quotes, or regex) to put in context
+my $word;
+
+# Help line, show if there's a screwup
+my $help = "Usage: $0 -w TERM [-c NUMBER OF CONTEXT WORDS] [-s SEPARATOR] [ -H/--no-header ] [ -l/--longtitle ] [ -d/--longdate] < FILE.json\n     Or pipe JSON output to $0 \n";
+
+# Initialize other command line options
+my $header = 0;
+my $longtitle = 0;
+my $longdate = 0;
+
+# Do the command line processing
+GetOptions(
+    'sep|s=s' => \$sep,
+    'no-header|H' => \$header,
+    'longtitle|l' => \$longtitle,
+    'longdate|d' => \$longdate,
+    'word|w=s' => \$word,
+    'context|c=i' => \$context,
+    ) or die "$help";
+
+# Print output header, unless suppress header is specified with -H or --header
+if (!$header) {
+    print "cap-id$sep",
+    "casename$sep",
+    "cite$sep",
+    "date$sep",
+    "courtname$sep",
+    "courtslug$sep",
+    "numopins$sep",    
+    "opintype$sep",
+    "opinnum$sep",
+    "casematch$sep",
+    "opinmatch$sep",
+    "before$sep",
+    "term$sep",
+    "after\n";	
+}
+
+# Parse input for JSON objects. Designed to be able to be fed either
+# pretty-printed (jq output) or one-line JSON (e.g. original CAP
+# format). Can pipe it via command line, or provide file to read.
+my $json = JSON->new;
+while (<>) {
+
+    # The key phrasing for this was here: 
+    #   https://stackoverflow.com/questions/30115199/parsing-json-block-by-block/30115617#30115617
+    my $obj = eval { $json->incr_parse( $_ ); };
+
+    # once an entire JSON object has been assembled, do something with it
+    if (ref $obj) {
+
+	## General format to refer to parts of the JSON object:
+	#print "$obj->{casebody}{data}{opinions}[0]{type} \n";  # WORKS: "majority" etc
+
+	# CAP ID
+	my $id = $obj->{id};
+	
+	# case name -- long if set on the command line, short version otherwise
+	my $casename;
+	if ($longtitle) {
+	    $casename = $obj->{name};
+	} else {
+	    $casename = $obj->{name_abbreviation};
+	}
+	# strip bad characters and newlines (!) from the casename
+	cleanup($casename);
+	$casename =~ s/\n//g;
+
+	# date
+	my $casedate;
+	if ($longdate) {
+	    $casedate = $obj->{decision_date};
+	} else {
+	    my @dates = split("-", $obj->{decision_date});
+	    $casedate = $dates[0];
+	}
+
+	# UNUSED: docket_number: $obj->{docket_number}
+	# UNUSED: first_page: $obj->{first_page}
+	# UNUSED: last_page: $obj->{last_page}
+
+	# citation -- note the possibility for parallel citations, but
+	# a casual glance at SCOTUS at least doesn't show that to be
+	# much of an issue -- would look for
+	# $obj->{citations}[0]{type} == "official" (but iterate the
+	# array)
+	my $citation = $obj->{citations}[0]{cite};
+
+	# UNUSED: volume of reporter: $obj->{volume}{volume_number}
+	# UNUSED: Reporter name: $obj->{reporter}{full_name}
+
+	# UNUSED: court ID (CAP): $obj->{court}{id}
+	# UNUSED: court name full: $obj->{court}{name}
+	# UNUSED: court jurisdiction URL: $obj->{court}{jurisdiction_url}
+	
+	# court name
+	my $courtname = $obj->{court}{name_abbreviation};
+	cleanup($courtname);
+	# court slug
+	my $courtslug = $obj->{court}{slug};
+	
+	# UNUSED: $obj->{jurisdiction}{id}
+	# UNUSED: $obj->{jurisdiction}{slug}        # us
+	# UNUSED: $obj->{jurisdiction}{name}        # U.S.
+	# UNUSED: $obj->{jurisdiction}{name_long}   # United States
+	# UNUSED: $obj->{jurisdiction}{whitelisted} # false/true
+
+	# UNUSED: $obj->{casebody}{status}  # "ok"
+	# UNUSED: $obj->{casebody}{data}{head_matter}
+
+	# NOTE: $obj->{casebody}{data}{opinions}    # an array of hashes/objects, so we process it below.
+	# UNUSED: $obj->{casebody}{data}{attorneys} # a straightforward array
+	# UNUSED: $obj->{casebody}{data}{parties}   # also apparently a straightforward array
+	# UNUSED: $obj->{casebody}{data}{judges}    # likewise, an apparently ordinary array
+	
+	# Number of opinion texts in this case
+	my $opintexts = scalar(@{$obj->{casebody}{data}{opinions}});
+
+	# Counter here for all matches for this case
+	my $casematchcount = 0;
+
+	# Opinion number tracker
+	my $opinnum = 0;
+	
+	# Now process each opinion within this case, and if we have matches, print a record	
+	my $opinions = $obj->{casebody}{data}{opinions};
+	for my $opin ( @$opinions ) {
+	    # UNUSED: AUTHOR: $opin->{author}
+	    my $orig_text = $opin->{text};
+
+	    # Set up opinion type (majority, etc) so it won't barf if null
+	    my $opintype = $opin->{type} // "";
+		
+	    # Increment opinion number early, so we use 1-based indexes for opinions
+	    $opinnum++;
+		
+	    # Clean the opinion text (weird unicode, etc etc see
+	    # function below), then lowercase. Could also remove
+	    # stopwords if desired. Then split, then build a record
+	    # based on each successful split
+
+	    cleanup($orig_text);
+	    
+	    # Then anything else
+	    my $text = unidecode($orig_text);
+
+	    # Finally, lowercase
+	    $text = lc($text);
+	    	    
+	    # Now split based on our keyword, then loop through the
+	    # resulting pieces of the opinion text. Split uses
+	    # parentheses to capture the matching word, so that
+	    # regexes can be used instead of plain words. On looping,
+	    # construct the before--term--after pieces of KWIC,
+	    # grabbing the appropriate number of words of context from
+	    # the end and beginning, respectively, to surround each
+	    # match, and printing the result. Note the first $piece
+	    # will be before the first $word match.
+
+	    my @pieces = split(/\b($word)\b/, $text);
+	    my $opinmatchcount = 0;
+	    my $before;
+	    my $matchword;
+	    my $after;
+	    my %matches;
+
+	    # Loop through the pieces, including matching words
+	    foreach my $piece (@pieces) {
+		my @words = split('\s+', $piece);
+
+		# behave special on the first one, so we can use the
+		# end of the piece in the next KWIC match
+		if ($opinmatchcount == 0) {
+
+		    ## Build the "before-keyword" part, then proceed to next one
+		    my @last = @words[ $#words - ($context - 1) .. $#words ];
+	    
+		    # Remove undefs, in case @last isn't as long as the set $context length
+		    @last = grep defined, @last;
+
+		    # Make the piece into a string of words
+		    $before = join " ", @last;
+
+		    # only increment here if this is the first opinion
+		    # to be processed; otherwise in our attempt to use
+		    # one-based counting of results it over-increments
+		    # when there is more than one opinion with a hit.
+		    if ($casematchcount == 0) {
+			$casematchcount++;
+		    }
+		    $opinmatchcount++;
+
+		} elsif ($piece =~ m/^$word$/) {
+		    ## We're on the term itself, just save it
+		    $matchword = $piece;
+		    
+		} else {
+
+		    ## Build the "after" part of the match, will be put
+		    ## together with the "before" constructed in last run
+		    my @first = @words[0 .. $context];
+
+		    # Remove undefs, in case @first isn't as long as the set $context length
+		    @first = grep defined, @first;
+
+		    # List to string
+		    $after = join " ", @first;
+
+		    # Trim both before and after; after in particular
+		    # regularly had a leading space.
+		    trim $before;
+		    trim $after;
+		    
+		    ## Print the data
+		    print "$id$sep",
+		    "$casename$sep",
+		    "$citation$sep",
+		    "$casedate$sep",
+		    "$courtname$sep",
+		    "$courtslug$sep",
+		    "$opintexts$sep",      
+		    "$opintype$sep",
+		    "$opinnum$sep",
+		    "$casematchcount$sep",
+		    "$opinmatchcount$sep",
+		    "$before$sep",
+		    "$matchword$sep",
+		    "$after\n";	
+
+		    $casematchcount++;
+		    $opinmatchcount++;
+	    
+		    ## Do this after the print, to set up the
+		    ## "next-before" which is the end of the current
+		    ## piece
+		    my @last = @words[ $#words - ($context - 1) .. $#words ];
+		    # Remove undefs, in case @last isn't as long as the set $context length
+		    @last = grep defined, @last;
+		    $before = join " ", @last;
+		}	
+	    }	    
+	}		
+	# END JSON record	
+    }
+}
+
+sub cleanup {
+    
+    # the single quotes - left, right, low, reverse
+    # other way, note "ge" regex: $orig_text =~ s/\x{201B}/chr(39)/ge;
+    $_[0] =~ s/\x{2018}/'/g;
+    $_[0] =~ s/\x{2019}/'/g;
+    $_[0] =~ s/\x{201A}/'/g;
+    $_[0] =~ s/\x{201B}/'/g;
+    
+    # the double quotes -- fullwidth, left, right, low, left and right pointing
+    # other way, using s///ge: $_[0] =~ s/\x{FF02}/chr(34)/ge;
+    $_[0] =~ s/\x{FF02}/"/g;
+    $_[0] =~ s/\x{201C}/"/g;
+    $_[0] =~ s/\x{201D}/"/g;
+    $_[0] =~ s/\x{201E}/"/g;
+    $_[0] =~ s/\x{00AB}/"/g;
+    $_[0] =~ s/\x{00BB}/"/g;
+    
+    # the dashes: hyphen, non-breaking hyphen, figure-dash, en-dash, em-dash, horizontal bar
+    # other way, s///ge: $_[0] =~ s/\x{2010}/chr(45)/g;
+    $_[0] =~ s/\x{2010}/\-/g;
+    $_[0] =~ s/\x{2011}/\-/g;
+    $_[0] =~ s/\x{2012}/\-/g;
+    $_[0] =~ s/\x{2013}/\-/g;
+    $_[0] =~ s/\x{2014}/\-/g;
+    $_[0] =~ s/\x{2015}/\-/g;
+    
+    # accented characters, usually from OCR stupidity
+    $_[0] =~ s/\x{00E1}/a/g;     # LATIN SMALL LETTER A WITH ACUTE, use chr(97)
+    $_[0] =~ s/\x{00F3}/o/g;     # LATIN SMALL LETTER O WITH ACUTE, use chr(111)
+    $_[0] =~ s/\x{00E9}/e/g;     # LATIN SMALL LETTER E WITH ACUTE, use chr(101)
+    $_[0] =~ s/\x{00FC}/u/g;     # LATIN SMALL LETTER U WITH DIAERESIS, use chr(117)
+    $_[0] =~ s/\x{00ED}/i/g;     # LATIN SMALL LETTER I WITH ACUTE, use chr(105)
+    $_[0] =~ s/\x{00F1}/n/g;     # LATIN SMALL LETTER N WITH TILDE
+    
+    # remove some troublesome characters entirely without replacement
+    $_[0] =~ s/[><]//g;          # angle brackets
+    $_[0] =~ s/\x{00AD}//g;      # unicode "soft hyphen"
+    
+    # a blunt hammer for the rest.
+    $_[0] =~ s/[^[:ascii:]]//g;
+    
+    # # other randomness I've seen in these
+    # #$_[0] =~ s/\x{00A7}/chr(83)/ge;     # section-sign, convert to capital S
+    # $_[0] =~ s/\x{25A0}//g;     # black square
+    # $_[0] =~ s/\x{00BF}//g;     # INVERTED QUESTION MARK
+    # $_[0] =~ s/\x{00BE}//g;     # U+00BE : VULGAR FRACTION THREE QUARTERS
+    # $_[0] =~ s/\x{215D}//g;     # U+215D : VULGAR FRACTION FIVE EIGHTHS
+    # $_[0] =~ s/\x{204E}//g;     # "low asterisk" (five sided) character
+    # $_[0] =~ s/\x{2217}//g;     # "asterisk operator" (five sided) character
+    # $_[0] =~ s/\x{FE61}//g;     # asterisk
+    # $_[0] =~ s/\x{FF0A}//g;     # asterisk
+    # $_[0] =~ s/\x{002A}//g;     # asterisk
+
+}

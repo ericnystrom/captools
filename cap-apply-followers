@@ -1,0 +1,49 @@
+#!/usr/bin/awk -f
+#
+# cap-apply-followers: Apply a map of mapped word classifications to an input file of KWIC results.
+# Output as a TSV of main results.
+#
+# Usage: cap-get-followers KWIC-POS.tsv | cap-map-followers MAPFILE "-" | cap-apply-followers "-" KWIC.tsv > RESULTS.tsv
+#
+# by Eric Nystrom, http://ericnystrom.org
+#   started: May 08, 2019
+#   version: May 20, 2020
+#
+#   license: MIT License
+
+BEGIN {
+    FS = "\t";
+    OFS = "\t";
+}
+
+# Process mapped results, probably coming in from STDIN.
+# Header present in the mapped results:
+#    cap-id	opintype	opinnum	casematch	opinmatch	followers	meaning
+NR == FNR {
+    # Try it this way at first, mapping the word based on the cap-id
+    # and the casematch, which is sequential. For this to work, the
+    # results file generated with cap-pos and that generated with
+    # cap-kwic must have been exactly identical.
+    map[$1,$4]=$7
+
+    # I like info, so save the follower too
+    follower[$1,$4]=$6
+}
+
+# Now process the main file
+# Includes header: 
+NR != FNR {
+
+    # Header first line
+    if (FNR == 1) {
+	print $0, "meaning", "follower"
+	next
+    }
+    
+    # map each line and print
+    print $0, map[$1,$10], follower[$1,$10]
+}
+
+    
+
+    

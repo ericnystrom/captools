@@ -1,0 +1,114 @@
+#!/usr/bin/perl
+# 
+# cap-get-followers: grab the following-noun/noun-phrase from
+#   POS-tagged KWIC data from the Caselaw Access Project (CAP)
+#   bulk-downloaded data -- e.g. the output of cap-pos.
+
+# by Eric Nystrom, http://ericnystrom.org
+#   started: March 14, 2019
+#   version: May 08, 2019
+#
+#   license: MIT License
+
+# Much love to PerlMonks and StackOverflow.
+
+# A potential usage, to get a list of words to classify:
+#   cap-get-followers FILE-pos.tsv | cut -f6 | sort | uniq -c | sed -e 's/^\s*//' -e 's/ /\t/' > FOLLOWER-WORDS.tsv
+
+# Or save output, to be used with cap-map-followers:
+#   cap-get-followers FILE-pos.tsv > FILE-pos_followers.tsv
+
+# Part of speech tags for this can be found here:
+#   https://metacpan.org/source/ACOBURN/Lingua-EN-Tagger-0.30/README
+
+# The Standard Preamble for Unicode: 
+#   https://www.perl.com/pub/2012/04/perlunicook-standard-preamble.html/
+
+use utf8;      # so literals and identifiers can be in UTF-8
+use v5.12;     # or later to get "unicode_strings" feature
+use strict;    # quote strings, declare variables
+use warnings;  # on by default
+use warnings  qw(FATAL utf8);    # fatalize encoding glitches
+use open      qw(:std :utf8);    # undeclared streams in UTF-8
+use charnames qw(:full :short);  # unneeded in v5.16
+use Encode qw(decode_utf8);
+use Text::Trim qw(trim);
+use Getopt::Long qw(GetOptions);
+Getopt::Long::Configure qw(gnu_getopt);
+
+#   Output separator
+#my $sep = "|";
+my $sep = "\t";
+# Option to ignore header?
+
+
+# Process each line of the output from cap-pos
+while (<>) {
+
+    # First input line is header, check the line counter and if found,
+    # treat differently and output our own
+    if ($. == 1 ) {
+	print "cap-id$sep",
+	"opintype$sep",
+	"opinnum$sep",
+	"casematch$sep",
+	"opinmatch$sep",
+	"followers\n";
+	next;
+    }
+   
+    # Remove newline, split into fields
+    chomp;
+    my @line = split($sep, $_);
+   
+    # "After" is 14th (rev'd) field, so given Perl's zero-indexed
+    # arrays, we want $line[13]. Wrap it in an "if" here to prevent
+    # Perl from carping if the field is empty, though TBH I don't know
+    # how it would wind up like that, but nonetheless it happens
+    # sometimes. Records with empty "followers" will not appear in the
+    # output.
+    if ($line[13]) {
+	
+	# split the "after" field into words/TAGS
+	my @words = split(" ", $line[13]);
+
+	my $follower;
+	my $nounyet = 0;
+
+	# loop over each word in the "follower" part
+	foreach my $word (@words) {
+	    # Split each word from its POS tag
+	    my @parts = split("/", $word);
+	    
+	    # If we haven't found a noun yet, add this word to the "follower" record
+	    if (! $nounyet) {
+		$follower .= $parts[0];
+		
+		# if we've just added a word, check what part of speech it
+		# is; if it's a noun, set $nounyet so we don't loop more;
+		# if it is something else, add a space to the "follower"
+		# record to separate this word from the one coming next.
+		if ($parts[1] =~ /^NN/) {
+		    $nounyet = 1;
+		} else {
+		    $follower .= " ";
+		}
+	    }	    	
+	}
+	# Strip punctuation, except hyphens
+	$follower =~ s/[^[:alnum:][:space:]-]//g;
+	# Trim any leftover whitespace
+	trim($follower);
+
+	# Output: cap-id ($1), opintype ($8), opinnum ($9), casematchcount ($10), opinmatchcount ($11), follower-nouns
+	print "$line[0]$sep",
+	"$line[7]$sep",
+	"$line[8]$sep",
+	"$line[9]$sep",
+	"$line[10]$sep",
+	"$follower\n";
+    } else {
+	# split field failed
+	print STDERR "FIELD DIDN'T SPLIT LINE $.: $_ \n";
+    }
+}
